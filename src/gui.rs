@@ -1,3 +1,4 @@
+use crate::msgqueue::ServiceId;
 use ggez::event::MouseButton;
 use ggez::graphics::Rect;
 use ggez::{Context, GameResult};
@@ -29,12 +30,24 @@ pub trait EventHandlerProxy {
     }
 }
 
-pub struct WidgetState {
+pub struct CommonWidgetState {
     pub visible: bool,
     pub enabled: bool,
     pub label: String,
     pub rect: Rect,
 }
+
+pub trait CommonWidget {
+    fn service_id(&self) -> ServiceId;
+    fn get_label(&self) -> Option<String> {
+        Some(
+            self.service_id()
+                .peek_state(|s: &CommonWidgetState| s.label.clone())?,
+        )
+    }
+    fn set_label(&self, label: String) {}
+}
+
 /*
 #[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub struct WidgetId(ObjId);

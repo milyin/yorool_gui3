@@ -13,11 +13,9 @@ pub struct ServiceId {
 }
 
 impl ServiceId {
-    pub fn new(queue: Arc<Mutex<MessageQueue>>) -> Self {
-        Self {
-            id: queue.lock().unwrap().register(),
-            message_queue: Arc::downgrade(&queue),
-        }
+    fn new(id: SrvId, message_queue: &Arc<Mutex<MessageQueue>>) -> Self {
+        let message_queue = Arc::downgrade(message_queue);
+        Self { id, message_queue }
     }
     pub fn with_message_queue<T, F>(&self, func: F) -> Option<T>
     where
@@ -31,7 +29,30 @@ impl ServiceId {
     pub fn clone_state<T: Any + Clone>(&self) -> Option<T> {
         self.with_message_queue(|q| q.clone_state(self.id))
     }
-    // TODO: unregister in destructor
+    pub fn peek_state<T: Any, V, F: FnOnce(&T) -> V>(&self, peek_func: F) -> Option<V> {
+        self.with_message_queue(|q| q.peek_state(self.id, peek_func))
+    }
+}
+
+pub struct ServiceReg {
+    id: SrvId,
+    message_queue: Arc<Mutex<MessageQueue>>,
+}
+
+impl ServiceReg {
+    pub fn new(message_queue: Arc<Mutex<MessageQueue>>) -> Self {
+        let id = message_queue.lock().unwrap().register();
+        Self { id, message_queue }
+    }
+    pub fn service_id(&self) -> ServiceId {
+        ServiceId::new(self.id, &self.message_queue)
+    }
+}
+
+impl Drop for ServiceReg {
+    fn drop(&mut self) {
+        self.message_queue.lock().unwrap().unregister(self.id)
+    }
 }
 
 #[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Debug)]
@@ -101,6 +122,23 @@ impl MessageQueue {
             .insert(data.type_id(), Box::new(data));
         Some(())
     }
+    fn peek_state<T: Any, V, F: FnOnce(&T) -> V>(&self, srv_id: SrvId, peek_func: F) -> Option<V> {
+        self.state_map(srv_id)?
+            .get(&TypeId::of::<T>())?
+            .downcast_ref::<T>()
+            .map(|v| peek_func(v))
+    }
+    fn poke_state<T: Any, V, F: FnOnce(&mut T) -> V>(
+        &mut self,
+        srv_id: SrvId,
+        poke_func: F,
+    ) -> Option<V> {
+        self.state_map_mut(srv_id)?
+            .get_mut(&TypeId::of::<T>())?
+            .downcast_mut::<T>()
+            .map(|v| poke_func(v))
+    }
+
     fn clone_state<T: Any + Clone>(&self, srv_id: SrvId) -> Option<T> {
         self.state_map(srv_id)?
             .get(&TypeId::of::<T>())?
