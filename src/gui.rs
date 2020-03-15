@@ -1,4 +1,5 @@
 use crate::msgqueue::ServiceId;
+use async_trait::async_trait;
 use ggez::event::MouseButton;
 use ggez::graphics::Rect;
 use ggez::{Context, GameResult};
@@ -37,15 +38,59 @@ pub struct CommonWidgetState {
     pub rect: Rect,
 }
 
-pub trait CommonWidget {
-    fn service_id(&self) -> ServiceId;
-    fn get_label(&self) -> Option<String> {
-        Some(
-            self.service_id()
-                .peek_state(|s: &CommonWidgetState| s.label.clone())?,
-        )
+impl CommonWidgetState {
+    fn new() -> Self {
+        Self {
+            visible: true,
+            enabled: true,
+            label: "Default".into(),
+            rect: Rect::zero(),
+        }
     }
-    fn set_label(&self, label: String) {}
+    fn peek<V, F: FnOnce(&Self) -> V>(id: ServiceId, peek_func: F) -> Option<V> {
+        Some(id.peek_state(peek_func)?)
+    }
+    fn poke<V, F: FnOnce(&mut Self) -> V>(id: ServiceId, poke_func: F) -> Option<V> {
+        Some(id.poke_state(poke_func)?)
+    }
+}
+
+impl Default for CommonWidgetState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub trait IService {
+    fn service_id(&self) -> ServiceId;
+}
+
+#[async_trait]
+pub trait IWidget: IService {
+    fn get_label(&self) -> Option<String> {
+        CommonWidgetState::peek(self.service_id(), |s| s.label.clone())
+    }
+    async fn set_label(&self, label: String) -> Option<()> {
+        CommonWidgetState::poke(self.service_id(), |s| s.label = label)
+    }
+    fn get_enabled(&self) -> Option<bool> {
+        CommonWidgetState::peek(self.service_id(), |s| s.enabled)
+    }
+    async fn set_enabled(&self, enabled: bool) -> Option<()> {
+        CommonWidgetState::poke(self.service_id(), |s| s.enabled = enabled)
+    }
+    fn get_visible(&self) -> Option<bool> {
+        CommonWidgetState::peek(self.service_id(), |s| s.visible)
+    }
+    async fn set_visible(&self, visible: bool) -> Option<()> {
+        CommonWidgetState::poke(self.service_id(), |s| s.visible = visible)
+    }
+    fn get_rect(&self) -> Option<Rect> {
+        CommonWidgetState::peek(self.service_id(), |s| s.rect.clone())
+    }
+    async fn set_rect(&self, rect: Rect) -> Option<()> {
+        CommonWidgetState::poke(self.service_id(), |s| s.rect = rect)
+    }
 }
 
 /*

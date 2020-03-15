@@ -23,14 +23,20 @@ impl ServiceId {
     {
         func(&mut *self.message_queue.upgrade()?.lock().ok()?)
     }
-    pub fn put_state<T: Any>(&self, data: T) -> Option<()> {
-        self.with_message_queue(|q| q.put_state(self.id, data))
+    pub fn put_state<T: Any + Send>(&self, data: T) {
+        self.with_message_queue(|q| {
+            q.put_state(&self.id, data);
+            Some(())
+        });
     }
     pub fn clone_state<T: Any + Clone>(&self) -> Option<T> {
-        self.with_message_queue(|q| q.clone_state(self.id))
+        self.with_message_queue(|q| q.clone_state(&self.id))
     }
     pub fn peek_state<T: Any, V, F: FnOnce(&T) -> V>(&self, peek_func: F) -> Option<V> {
-        self.with_message_queue(|q| q.peek_state(self.id, peek_func))
+        self.with_message_queue(|q| q.peek_state(&self.id, peek_func))
+    }
+    pub fn poke_state<T: Any, V, F: FnOnce(&mut T) -> V>(&self, poke_func: F) -> Option<V> {
+        self.with_message_queue(|q| q.poke_state(&self.id, poke_func))
     }
 }
 
@@ -67,13 +73,13 @@ impl ReqId {
     }
 }
 
-type StateMap = HashMap<TypeId, Box<dyn Any>>;
-type RequestsQueue = VecDeque<(ReqId, Box<dyn Any>)>;
+type StateMap = HashMap<TypeId, Box<dyn Any + Send>>;
+type RequestsQueue = VecDeque<(ReqId, Box<dyn Any + Send>)>;
 
 #[derive(Debug)]
 pub struct MessageQueue {
     services: HashMap<SrvId, (StateMap, RequestsQueue)>,
-    responses: HashMap<ReqId, Option<Box<dyn Any>>>,
+    responses: HashMap<ReqId, Option<Box<dyn Any + Send>>>,
     wakers: HashMap<ReqId, Waker>,
     next_srv_id: SrvId,
     next_req_id: ReqId,
@@ -103,26 +109,31 @@ impl MessageQueue {
         self.services.remove(&srv_id);
     }
 
-    fn state_map_mut(&mut self, srv_id: SrvId) -> Option<&mut StateMap> {
+    fn state_map_mut(&mut self, srv_id: &SrvId) -> Option<&mut StateMap> {
         self.services
-            .get_mut(&srv_id)
+            .get_mut(srv_id)
             .map(|(state_map, _)| state_map)
     }
 
-    fn state_map(&self, srv_id: SrvId) -> Option<&StateMap> {
-        self.services.get(&srv_id).map(|(state_map, _)| state_map)
+    fn state_map(&self, srv_id: &SrvId) -> Option<&StateMap> {
+        self.services.get(srv_id).map(|(state_map, _)| state_map)
     }
 
-    fn requests_queue_mut(&mut self, srv_id: SrvId) -> Option<&mut RequestsQueue> {
-        self.services.get_mut(&srv_id).map(|(_, queue)| queue)
+    fn requests_queue_mut(&mut self, srv_id: &SrvId) -> Option<&mut RequestsQueue> {
+        self.services.get_mut(srv_id).map(|(_, queue)| queue)
     }
 
-    fn put_state<T: Any>(&mut self, srv_id: SrvId, data: T) -> Option<()> {
-        self.state_map_mut(srv_id)?
-            .insert(data.type_id(), Box::new(data));
-        Some(())
+    fn put_state<T: Any + Send>(&mut self, srv_id: &SrvId, data: T) {
+        if let Some(state_map) = self.state_map_mut(srv_id) {
+            state_map.insert(data.type_id(), Box::new(data));
+        } else {
+            let mut state_map = StateMap::new();
+            state_map.insert(data.type_id(), Box::new(data));
+            self.services
+                .insert(srv_id.clone(), (state_map, RequestsQueue::new()));
+        }
     }
-    fn peek_state<T: Any, V, F: FnOnce(&T) -> V>(&self, srv_id: SrvId, peek_func: F) -> Option<V> {
+    fn peek_state<T: Any, V, F: FnOnce(&T) -> V>(&self, srv_id: &SrvId, peek_func: F) -> Option<V> {
         self.state_map(srv_id)?
             .get(&TypeId::of::<T>())?
             .downcast_ref::<T>()
@@ -130,7 +141,7 @@ impl MessageQueue {
     }
     fn poke_state<T: Any, V, F: FnOnce(&mut T) -> V>(
         &mut self,
-        srv_id: SrvId,
+        srv_id: &SrvId,
         poke_func: F,
     ) -> Option<V> {
         self.state_map_mut(srv_id)?
@@ -139,19 +150,19 @@ impl MessageQueue {
             .map(|v| poke_func(v))
     }
 
-    fn clone_state<T: Any + Clone>(&self, srv_id: SrvId) -> Option<T> {
+    fn clone_state<T: Any + Clone>(&self, srv_id: &SrvId) -> Option<T> {
         self.state_map(srv_id)?
             .get(&TypeId::of::<T>())?
             .downcast_ref::<T>()
             .map(|v| v.clone())
     }
-    fn remove_state<T: Any>(&mut self, srv_id: SrvId) -> Option<T> {
+    fn remove_state<T: Any>(&mut self, srv_id: &SrvId) -> Option<T> {
         self.state_map_mut(srv_id)?
             .remove(&TypeId::of::<T>())
             .and_then(|v| v.downcast::<T>().ok().map(|v| *v))
     }
 
-    fn post_request(&mut self, srv_id: SrvId, request: Box<dyn Any>) -> Option<ReqId> {
+    fn post_request(&mut self, srv_id: &SrvId, request: Box<dyn Any + Send>) -> Option<ReqId> {
         let req_id = self.next_req_id;
         {
             let queue = self.requests_queue_mut(srv_id)?;
@@ -160,10 +171,10 @@ impl MessageQueue {
         self.next_req_id = self.next_req_id.next();
         Some(req_id)
     }
-    fn take_request(&mut self, srv_id: SrvId) -> Option<(ReqId, Box<dyn Any>)> {
+    fn take_request(&mut self, srv_id: &SrvId) -> Option<(ReqId, Box<dyn Any + Send>)> {
         self.requests_queue_mut(srv_id)?.pop_back()
     }
-    fn set_response(&mut self, req_id: ReqId, resp: Option<Box<dyn Any>>) {
+    fn set_response(&mut self, req_id: ReqId, resp: Option<Box<dyn Any + Send>>) {
         self.responses.insert(req_id, resp);
         if let Some(waker) = self.wakers.remove(&req_id) {
             waker.wake()
@@ -174,7 +185,7 @@ impl MessageQueue {
         srv_id: SrvId,
         req_id: ReqId,
         waker: Waker,
-    ) -> Result<Option<Box<dyn Any>>, ()> {
+    ) -> Result<Option<Box<dyn Any + Send>>, ()> {
         match self.responses.remove(&req_id) {
             // Normal response
             Some(resp @ Some(_)) => Ok(resp),
